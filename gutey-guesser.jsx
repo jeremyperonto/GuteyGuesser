@@ -5,9 +5,11 @@ const LOGO = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAASwAAAEyCAYAAABAoe2e
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 const POSITIONS = ["QB","RB","WR","TE","OL","DL","EDGE","LB","DB","K","P"];
 
+const DEFAULT_INVITE_CODE = process.env.INVITE_CODE || "CHANGE_ME";     // set before deploying
+
 // Default pick slots for 2026. Commissioner can add/remove via Admin.
-// Each slot: { id, round, label, traded? }
-// id is used as the key in picks/actualPicks. round drives scoring.
+// Each slot: { id, round, label, pickNumber?, traded? }
+// id is the key in picks/actualPicks. round drives scoring. pickNumber is display-only.
 const DEFAULT_SLOTS = [
   {id:"2",  round:2, label:"Round 2",  pickNumber:52},
   {id:"3",  round:3, label:"Round 3",  pickNumber:84},
@@ -22,7 +24,6 @@ const LOCK_TIMES = {
   day3: new Date("2026-04-25T12:00:00-05:00"),
 };
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "CHANGE_ME";       // set before deploying
-const DEFAULT_INVITE_CODE = process.env.INVITE_CODE || "CHANGE_ME";     // set before deploying
 const STATUS_COLORS = {
   perfect:"#FFB612",player:"#5BA877",position:"#5B9BD5",
   partial:"#9B7ECC",miss:"#4A5E4E",pending:"#3A4E3E",none:"#2A3A2E",
@@ -548,11 +549,14 @@ const calcScore = (userPicks, actualPicks, slots) => {
 };
 
 // ─── STORAGE ─────────────────────────────────────────────────────────────────
+const withTimeout = (promise, ms=3000) =>
+  Promise.race([promise, new Promise((_,rej)=>setTimeout(()=>rej(new Error("timeout")),ms))]);
+
 const safeGet = async (key,shared) => {
-  try{const r=await window.storage.get(key,shared);return r?JSON.parse(r.value):null;}catch{return null;}
+  try{const r=await withTimeout(window.storage.get(key,shared));return r?JSON.parse(r.value):null;}catch{return null;}
 };
 const safeSet = async (key,val,shared) => {
-  try{await window.storage.set(key,JSON.stringify(val),shared);return true;}catch{return false;}
+  try{await withTimeout(window.storage.set(key,JSON.stringify(val),shared));return true;}catch{return false;}
 };
 
 // ─── ROOT ────────────────────────────────────────────────────────────────────
@@ -573,14 +577,12 @@ export default function GuteyGuesser() {
   const [adminPw, setAdminPw] = useState("");
   const [adminError, setAdminError] = useState("");
   const [adminInput, setAdminInput] = useState({});
-  const [newCode, setNewCode] = useState("");
   const [saveMsg, setSaveMsg] = useState("");
   const [loading, setLoading] = useState(false);
   const [now, setNow] = useState(new Date());
   const [expandedLeader, setExpandedLeader] = useState(null);
   const [expandedYear, setExpandedYear] = useState(null);
   const [expandedHistoryPerson, setExpandedHistoryPerson] = useState(null); // {year, name}
-  const [inviteCode, setInviteCode] = useState(DEFAULT_INVITE_CODE);
   const [saveErrors, setSaveErrors] = useState({});
 
   useEffect(()=>{
@@ -591,7 +593,6 @@ export default function GuteyGuesser() {
     document.body.style.margin="0";
     document.body.style.background="#0A1A0C";
     const timer=setInterval(()=>setNow(new Date()),30000);
-    safeGet("invite-code",true).then(s=>{if(s)setInviteCode(s);});
     safeGet("pick-slots",true).then(s=>{if(s&&Array.isArray(s))setPickSlots(s);});
     // Load actual picks for public view
     safeGet("actual-picks",true).then(a=>{if(a)setActualPicks(a);});
@@ -625,22 +626,26 @@ export default function GuteyGuesser() {
 
   useEffect(()=>{if(userName)loadData();},[userName,loadData]);
 
-  const handleCodeSubmit = async()=>{
-    const cur=(await safeGet("invite-code",true))||DEFAULT_INVITE_CODE;
-    if(codeInput.trim().toLowerCase()===cur.toLowerCase()){setAuthState("enter-name");setCodeError("");}
-    else setCodeError("Incorrect code. Ask the commissioner.");
+  const handleCodeSubmit = ()=>{
+    if(codeInput.trim().toLowerCase()===DEFAULT_INVITE_CODE){
+      setAuthState("enter-name");setCodeError("");
+    } else {
+      setCodeError("Incorrect code. Ask the commissioner.");
+    }
   };
 
   const handleJoin = async()=>{
     const name=nameInput.trim();
     if(!name||name.length<2) return;
-    setLoading(true);
-    const members=(await safeGet("family-members",true))||[];
-    if(!members.includes(name)) await safeSet("family-members",[...members,name],true);
+    // Advance UI immediately — never block on storage
     setUserName(name);
     setAuthState("participating");
     setTab("picks");
-    setLoading(false);
+    // Register member in background — failure is non-fatal
+    safeGet("family-members",true).then(members=>{
+      const list=members||[];
+      if(!list.includes(name)) safeSet("family-members",[...list,name],true);
+    });
   };
 
   const validatePicks=()=>{
@@ -711,13 +716,6 @@ export default function GuteyGuesser() {
   const removePickSlot=async(slotId)=>{
     const newSlots=pickSlots.filter(s=>s.id!==slotId);
     await saveSlots(newSlots);
-  };
-
-  const saveNewCode=async()=>{
-    const code=newCode.trim().toLowerCase();
-    if(!code||code.length<4) return;
-    await safeSet("invite-code",code,true);
-    setInviteCode(code);setNewCode("");
   };
 
   const tryAdmin=()=>{
@@ -881,14 +879,11 @@ export default function GuteyGuesser() {
           <div>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:14}}>
               <h2 style={{...T.heading,fontSize:28,color:G.gold,margin:0}}>2026 LEADERBOARD</h2>
-              {!isParticipating&&(
-                <button style={{...s.btn("gold"),padding:"7px 14px",fontSize:12}} onClick={()=>setAuthState("enter-code")}>Submit Picks</button>
-              )}
             </div>
             {board.length===0&&(
               <div style={{...s.card,textAlign:"center",padding:32}}>
-                <p style={{color:G.muted,margin:"0 0 12px",fontSize:14}}>No picks submitted yet.</p>
-                {!isParticipating&&<button style={{...s.btn("gold"),padding:"8px 18px"}} onClick={()=>setAuthState("enter-code")}>Be the first — Submit Picks</button>}
+                <p style={{color:G.muted,margin:"0 0 16px",fontSize:14}}>No picks submitted yet.</p>
+                {!isParticipating&&<button style={{...s.btn("gold"),padding:"10px 24px",fontSize:13}} onClick={()=>setAuthState("enter-code")}>Submit Picks</button>}
               </div>
             )}
             {board.map((entry,i)=>{
@@ -1094,15 +1089,6 @@ export default function GuteyGuesser() {
               </div>
             ):(
               <div>
-                <div style={{...s.card,borderColor:G.gold+"33",marginBottom:12}}>
-                  <p style={{...T.sub,color:G.gold,fontSize:11,margin:"0 0 8px",textTransform:"uppercase",letterSpacing:1}}>Invite Code</p>
-                  <p style={{color:G.muted,fontSize:13,margin:"0 0 8px"}}>Current: <span style={{color:G.text,fontWeight:600,letterSpacing:2}}>{inviteCode.toUpperCase()}</span></p>
-                  <p style={{color:G.dim,fontSize:12,margin:"0 0 10px"}}>Anyone with this code can submit picks. Share only with participants.</p>
-                  <div style={{display:"flex",gap:6}}>
-                    <input style={{...s.inp(false),letterSpacing:1}} placeholder="New invite code" value={newCode} onChange={e=>setNewCode(e.target.value)} />
-                    <button style={{...s.btn("green"),padding:"9px 14px",whiteSpace:"nowrap"}} onClick={saveNewCode}>Update</button>
-                  </div>
-                </div>
                 <p style={{color:G.lightGreen,marginBottom:10,fontSize:12,...T.sub}}>Commissioner mode — enter actual Packers picks below.</p>
 
                 {/* ── Pick Slot Management ── */}
@@ -1176,7 +1162,10 @@ export default function GuteyGuesser() {
           <img src={LOGO} alt="GB" style={{width:60,height:60,objectFit:"contain",marginBottom:12}} />
           <h2 style={{...T.heading,fontSize:32,color:G.gold,margin:"0 0 4px"}}>SUBMIT PICKS</h2>
           <p style={{color:G.muted,fontSize:13,margin:"0 0 18px"}}>Enter your invite code to participate</p>
-          <input style={{...s.inp(false),fontSize:16,padding:"12px 14px",marginBottom:10,textAlign:"center",letterSpacing:3,textTransform:"uppercase"}} placeholder="Invite code" value={codeInput} onChange={e=>setCodeInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleCodeSubmit()} autoFocus />
+          <input style={{...s.inp(!!codeError),fontSize:16,padding:"12px 14px",marginBottom:8,textAlign:"center",letterSpacing:3,textTransform:"uppercase"}}
+            placeholder="Invite code" value={codeInput}
+            onChange={e=>{setCodeInput(e.target.value);setCodeError("");}}
+            onKeyDown={e=>e.key==="Enter"&&handleCodeSubmit()} autoFocus />
           {codeError&&<p style={{color:"#E74C3C",fontSize:13,margin:"0 0 10px"}}>{codeError}</p>}
           <button style={{...s.btn("gold"),width:"100%",padding:12,fontSize:14,marginBottom:10}} onClick={handleCodeSubmit}>Continue</button>
           <button style={{...s.btn("ghost"),width:"100%",padding:10,fontSize:12}} onClick={()=>{setAuthState("public");setCodeInput("");setCodeError("");}}>Cancel</button>
@@ -1194,12 +1183,20 @@ export default function GuteyGuesser() {
       {/* ── MODAL: Enter Name ── */}
       {authState==="enter-name"&&(
         <Modal>
-          <img src={LOGO} alt="GB" style={{width:52,height:52,objectFit:"contain",marginBottom:12}} />
-          <h2 style={{...T.heading,fontSize:30,color:G.gold,margin:"0 0 4px"}}>WHO ARE YOU?</h2>
+          <img src={LOGO} alt="GB" style={{width:60,height:60,objectFit:"contain",marginBottom:12}} />
+          <h2 style={{...T.heading,fontSize:32,color:G.gold,margin:"0 0 4px"}}>SUBMIT PICKS</h2>
           <p style={{color:G.muted,fontSize:13,margin:"0 0 18px"}}>Enter your name to join the board</p>
           <input style={{...s.inp(false),fontSize:17,padding:"12px 14px",marginBottom:14,textAlign:"center"}} placeholder="Your name" value={nameInput} onChange={e=>setNameInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleJoin()} autoFocus />
-          <button style={{...s.btn("gold"),width:"100%",padding:12,fontSize:14,marginBottom:10}} onClick={handleJoin} disabled={loading}>{loading?"Joining...":"Enter the War Room"}</button>
+          <button style={{...s.btn("gold"),width:"100%",padding:12,fontSize:14,marginBottom:10}} onClick={handleJoin}>Enter the Draft Room</button>
           <button style={{...s.btn("ghost"),width:"100%",padding:10,fontSize:12}} onClick={()=>{setAuthState("public");setNameInput("");}}>Cancel</button>
+          <div style={{marginTop:18,borderTop:`1px solid ${G.border}`,paddingTop:16,textAlign:"left"}}>
+            <p style={{...T.sub,color:G.gold,fontSize:11,margin:"0 0 8px",textTransform:"uppercase",letterSpacing:1.5}}>Scoring</p>
+            {[["Right player, right round","15"],["Right player, different round","10"],["Right position, right round","5"],["Right position, different round","1"]].map(([l,p])=>(
+              <div key={l} style={{display:"flex",justifyContent:"space-between",marginBottom:4,fontSize:12}}>
+                <span style={{color:G.muted}}>{l}</span><span style={{color:G.gold,...T.sub}}>{p} pts</span>
+              </div>
+            ))}
+          </div>
         </Modal>
       )}
 
